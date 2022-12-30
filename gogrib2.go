@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/golang/glog"
 	"github.com/pkg/errors"
 	"github.com/sdifrance/gogrib2/internal"
 )
@@ -28,15 +29,19 @@ type Value struct {
 }
 
 // Read reads raw GRIB2 files and return slice of structured GRIB2 data
+//
+// GRIB2 is specified here: https://library.wmo.int/doc_num.php?explnum_id=11283
 func Read(data []byte) ([]GRIB2, error) {
-	if data == nil {
-		return nil, errors.New("Raw data is nil")
+
+	ind := &indicatorSection{}
+	if err := ind.parseBytes(data); err != nil {
+		return nil, fmt.Errorf("error parsing indicator section: %w", err)
 	}
 
 	dlen := len(data)
 
 	if dlen < 4 {
-		return nil, errors.New("Raw data should be 4 bytes at least")
+		return nil, errors.New("raw data should be 4 bytes at least")
 	}
 
 	gribs := []GRIB2{}
@@ -52,7 +57,16 @@ func Read(data []byte) ([]GRIB2, error) {
 			Values: []Value{},
 		}
 
-		sections := [][]byte{nil, nil, nil, nil, nil, nil, nil, nil}
+		sections := [][]byte{
+			nil, // Indicator section: “GRIB”, discipline, GRIB edition number, length of message
+			nil, // Identification section
+			nil, // Local use section (repeated)
+			nil,
+			nil,
+			nil,
+			nil,
+			nil, // End section
+		}
 
 		size := 16
 		sections[0] = data[start : start+size]
@@ -118,6 +132,9 @@ func Read(data []byte) ([]GRIB2, error) {
 			} else {
 				size = int(binary.BigEndian.Uint32(data[start:]))
 				cur = int(data[start+4])
+				if start+size > len(data) {
+					return nil, fmt.Errorf("internal error: tried to read [%d:%d] from data array of length %d", start, start+size, len(data))
+				}
 				sections[cur] = data[start : start+size]
 			}
 			start += size
@@ -131,4 +148,41 @@ func Read(data []byte) ([]GRIB2, error) {
 	}
 
 	return gribs, nil
+}
+
+type indicatorSection struct {
+	discipline    byte
+	edition       byte
+	messageLength uint64
+}
+
+func (is *indicatorSection) parseBytes(data []byte) error {
+	/* https://library.wmo.int/doc_num.php?explnum_id=11283
+
+	92.2 Section 0 – Indicator section
+
+	Section 0 – Indicator section
+	Octet No. Contents
+	1–4 GRIB (coded according to the International Alphabet No. 5)
+	5–6 Reserved
+	7 Discipline – GRIB Master table number (see Code table 0.0)
+	8 GRIB edition number (currently 2)
+	9–16 Total length of GRIB message in octets (including Section 0)
+	*/
+
+	if len(data) < 16 {
+		return fmt.Errorf("invalid GRIB file < 16 bytes long")
+	}
+	data = data[0:16]
+	if got, want := string(data[0:4]), "GRIB"; got != want {
+		return fmt.Errorf("first four bytes = %q, want %q", got, want)
+	}
+	is.discipline = data[6]
+	is.edition = data[7]
+
+	is.messageLength = binary.BigEndian.Uint64(data[8 : 8+8])
+
+	glog.Infof("read indicator section %+v", is)
+
+	return nil
 }
