@@ -1,10 +1,20 @@
+// Package grib1 contains a parser for GRIB messages that use edition 1.
+//
+// The specification for GRIB1 is available as PDF from
+// https://wmoomm.sharepoint.com/sites/wmocpdb/eve_activityarea/Forms/AllItems.aspx?id=%2Fsites%2Fwmocpdb%2Feve%5Factivityarea%2FWMO%20Codes%2FWMO306%5FvI2%2FPrevEDITIONS%2FGRIB1%2FWMO306%5FvI2%5FGRIB1%5Fen%2Epdf&parent=%2Fsites%2Fwmocpdb%2Feve%5Factivityarea%2FWMO%20Codes%2FWMO306%5FvI2%2FPrevEDITIONS%2FGRIB1&p=true&ga=1
+// and in an HTML format https://apps.ecmwf.int/codes/grib/format/grib1/sections/3/.
 package grib1
+
+/*
+
+During development of this library, it's useful to grib_dump use grib_dump to
+inspect the contents from the C library:
+/usr/local/google/home/reddaly/tmp/ERA5_Land_Hourly_20221023_default_00.grib
+*/
 
 import (
 	"encoding/binary"
 	"fmt"
-
-	"github.com/golang/glog"
 )
 
 // Message is a GRIB1 record.
@@ -14,6 +24,14 @@ type Message struct {
 	grid    *gridDescriptionSection
 	bitmap  *bitmapSection
 	binary  *binaryDataSection
+}
+
+// String returns a summary description of the message.
+func (m *Message) String() string {
+	if m.product.indicatorOfParameter == 169 {
+		return "SOLAR DOWNWARD RADIATION"
+	}
+	return fmt.Sprintf("indicator of parameter = https://apps.ecmwf.int/codes/grib/param-db/?id=%d; table2Version = %d", m.product.indicatorOfParameter, m.product.table2Version)
 }
 
 // Value is data item of GRIB2 file
@@ -99,7 +117,6 @@ func Read1(data []byte) (*Message, int, error) {
 		if err != nil {
 			return nil, 0, fmt.Errorf("error parsing indicator section: %w", err)
 		}
-		sec3.values = nil // DO NOT SUBMIT
 		unconsumed = unconsumed[bytesRead:]
 		offset += bytesRead
 	}
@@ -132,8 +149,6 @@ func Read1(data []byte) (*Message, int, error) {
 		}
 		return nil, 0, fmt.Errorf("consumed %d bytes, expected to consume %d based on message length in header%s", consumedCount, sec0.messageLength, extraInfo)
 	}
-
-	glog.Infof("Section0:\n%+v\n\nSection1:\n%+v\n\nSection 2:\n%+v\n\nSection 3:\n%+v\n\nSection 4:\n%+v", sec0, sec1, sec2, sec3, sec4)
 
 	return &Message{
 		sec0, sec1, sec2, sec3, sec4,
@@ -172,35 +187,37 @@ func (is *indicatorSection) parseBytes(data []byte) (int, error) {
 		return 0, fmt.Errorf("message length is %d, but only %d bytes supplied", is.messageLength, len(messageData))
 	}
 
-	glog.Infof("read indicator section %+v", is)
-
 	return 8, nil
 }
 
 type productDefSection struct {
-	section1Length                           uint32 // parse3ByteUint(data[0], data[1], data[2])
-	table2Version                            uint8  // data[3]
-	center                                   uint8  // data[4]
-	generatingProcessIdentifier              uint8  // data[5]
-	gridDefinition                           uint8  // data[6]
-	section1Flags                            uint8  // data[7]
-	indicatorOfParameter                     uint8  // data[8]
-	indicatorOfTypeOfLevel                   uint8  // data[9]
-	heightPressureEtcOfLevels                uint32 // parse2ByteUint(data[10], data[11])
-	yearOfCentury                            uint8  // data[12]
-	month                                    uint8  // data[13]
-	day                                      uint8  // data[14]
-	hour                                     uint8  // data[15]
-	minute                                   uint8  // data[16]
-	unitOfTimeRange                          uint8  // data[17]
-	p1                                       uint8  // data[18]
-	p2                                       uint8  // data[19]
-	timeRangeIndicator                       uint8  // data[20]
-	numberIncludedInAverage                  uint32 // parse2ByteUint(data[21], data[22])
-	numberMissingFromAveragesOrAccumulations uint8  // data[23]
-	centuryOfReferenceTimeOfData             uint8  // data[24]
-	subCentre                                uint8  // data[25]
-	decimalScaleFactor                       int32  // parse2ByteUint(data[21], data[22])
+	section1Length              uint32 // parse3ByteUint(data[0], data[1], data[2])
+	table2Version               uint8  // data[3]
+	center                      uint8  // data[4]
+	generatingProcessIdentifier uint8  // data[5]
+	gridDefinition              uint8  // data[6]
+	section1Flags               uint8  // data[7]
+	// Indicator of parameter (see Code table 2).
+	//
+	// This might indicate the type of data represented? e.g., 169 corresponds to
+	// downward solar radiation. https://apps.ecmwf.int/codes/grib/param-db/?id=169
+	indicatorOfParameter                     uint8      // data[8]
+	indicatorOfTypeOfLevel                   uint8      // data[9]
+	heightPressureEtcOfLevels                uint32     // parse2ByteUint(data[10], data[11])
+	yearOfCentury                            uint8      // data[12]
+	month                                    uint8      // data[13]
+	day                                      uint8      // data[14]
+	hour                                     uint8      // data[15]
+	minute                                   uint8      // data[16]
+	unitOfTimeRange                          UnitOfTime // data[17]
+	p1                                       uint8      // data[18]
+	p2                                       uint8      // data[19]
+	timeRangeIndicator                       uint8      // data[20]
+	numberIncludedInAverage                  uint32     // parse2ByteUint(data[21], data[22])
+	numberMissingFromAveragesOrAccumulations uint8      // data[23]
+	centuryOfReferenceTimeOfData             uint8      // data[24]
+	subCentre                                uint8      // data[25]
+	decimalScaleFactor                       int32      // parse2ByteUint(data[21], data[22])
 }
 
 /*
@@ -274,7 +291,7 @@ func (s *productDefSection) parseBytes(data []byte) (int, error) {
 	s.day = data[14]
 	s.hour = data[15]
 	s.minute = data[16]
-	s.unitOfTimeRange = data[17]
+	s.unitOfTimeRange = UnitOfTime(data[17])
 	s.p1 = data[18]
 	s.p2 = data[19]
 	s.timeRangeIndicator = data[20]
@@ -507,3 +524,27 @@ func parse4ByteReal(byte0, byte1, byte2, byte3 byte) real {
 	// A negative value of D shall be indicated by setting the high-order bit (bit 1) in the left-hand octet to 1 (on).
 	return real(parse4ByteUint(byte0, byte1, byte2, byte3))
 }
+
+// UnitOfTime is based on table 4 from the spec. See
+// https://github.com/ecmwf/eccodes/blob/fd549250dc5fe8f7f07dd242b8e781f73982735f/definitions/grib1/4.table
+type UnitOfTime uint8
+
+// Units of time from the GRIB1 spec.
+//
+// See https://apps.ecmwf.int/codes/grib/format/grib1/ctable/4/
+const (
+	UnitOfTimeMinute    = 0
+	UnitOfTimeHour      = 1
+	UnitOfTimeDay       = 2
+	UnitOfTimeMonth     = 3
+	UnitOfTimeYear      = 4
+	UnitOfTimeDecade    = 5
+	UnitOfTimeNormal    = 6
+	UnitOfTimeCentury   = 7
+	UnitOfTime3Hours    = 10
+	UnitOfTime6Hours    = 11
+	UnitOfTime12Hours   = 12
+	UnitOfTime15Minutes = 13
+	UnitOfTime30Minutes = 14
+	UnitOfTimeSecond    = 254
+)

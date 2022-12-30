@@ -13,6 +13,12 @@ import (
 	"github.com/sdifrance/gogrib2/grib1"
 )
 
+const (
+	// TODO(reddaly): Figure out where this is documented. It seems records have
+	// leading zero bytes before the GRIB magic word.
+	shouldSkipLeadingZeros = true
+)
+
 type File struct {
 	grib1Messages []*grib1.Message
 }
@@ -27,7 +33,6 @@ func ReadFile(r io.Reader) (*File, error) {
 	rr := bufio.NewReader(r)
 	offset := 0
 	for {
-		glog.Infof("reading record starting at byte offset %d", offset)
 		skipCount, err := skipZeros(rr)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
@@ -39,9 +44,11 @@ func ReadFile(r io.Reader) (*File, error) {
 
 		parseType, messageLen, err := peekParseType(rr)
 		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return &File{grib1Messages}, nil
+			}
 			return nil, fmt.Errorf("error encountered when expecting a GRIB message: %w", err)
 		}
-		glog.Infof("record @ offset %d is of type %v", offset, parseType)
 		recordBytes := make([]byte, int(messageLen))
 
 		readCount, err := io.ReadFull(rr, recordBytes)
@@ -75,6 +82,9 @@ func skipZeros(rr *bufio.Reader) (int, error) {
 			skipCount++
 			continue
 		}
+		if !shouldSkipLeadingZeros && skipCount > 0 {
+			return skipCount, fmt.Errorf("shouldSkipLeadingZeros = false but encountered %d leading zero bytes", skipCount)
+		}
 		if err := rr.UnreadByte(); err != nil {
 			return skipCount, err // Maybe annotate this error?
 		}
@@ -94,7 +104,7 @@ func peekParseType(rr *bufio.Reader) (parseType, uint64, error) {
 	// Peek 16 bytes.
 	data, err := rr.Peek(16)
 	if err != nil {
-		return parseAsInvalidMessage, 0, fmt.Errorf("error while expecting GRIB record: %w", err)
+		return parseAsInvalidMessage, 0, fmt.Errorf("error while trying to read bytes for GRIB record: %w", err)
 	}
 
 	if got, want := string(data[0:4]), "GRIB"; got != want {
