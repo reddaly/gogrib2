@@ -41,10 +41,11 @@ func ReadFile(r io.Reader) (*File, error) {
 		if err != nil {
 			return nil, fmt.Errorf("error encountered when expecting a GRIB message: %w", err)
 		}
-		glog.Infof("record @ offset %d is of type %s", offset, parseType)
+		glog.Infof("record @ offset %d is of type %v", offset, parseType)
 		recordBytes := make([]byte, int(messageLen))
 
-		if readCount, err := rr.Read(recordBytes); err != nil {
+		readCount, err := io.ReadFull(rr, recordBytes)
+		if err != nil {
 			return nil, fmt.Errorf("error while reading message of expected length %d; only read %d bytes: %w", messageLen, readCount, err)
 		}
 

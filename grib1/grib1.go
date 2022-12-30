@@ -63,12 +63,14 @@ func read1MaybeZeroPadded(data []byte) (*Message, int, error) {
 
 // Read1 reads a single GRIB1 message from a byte array.
 func Read1(data []byte) (*Message, int, error) {
+	offset := 0
 	sec0 := &indicatorSection{}
 	bytesRead, err := sec0.parseBytes(data)
 	if err != nil {
 		return nil, 0, fmt.Errorf("error parsing indicator section: %w", err)
 	}
 	unconsumed := data[bytesRead:]
+	offset += bytesRead
 
 	sec1 := &productDefSection{}
 	bytesRead, err = sec1.parseBytes(unconsumed)
@@ -76,21 +78,31 @@ func Read1(data []byte) (*Message, int, error) {
 		return nil, 0, fmt.Errorf("error parsing indicator section: %w", err)
 	}
 	unconsumed = unconsumed[bytesRead:]
+	offset += bytesRead
 
-	sec2 := &gridDescriptionSection{}
-	bytesRead, err = sec2.parseBytes(unconsumed)
-	if err != nil {
-		return nil, 0, fmt.Errorf("error parsing indicator section: %w", err)
-	}
-	unconsumed = unconsumed[bytesRead:]
+	var sec2 *gridDescriptionSection
+	var sec3 *bitmapSection
 
-	sec3 := &bitmapSection{}
-	bytesRead, err = sec3.parseBytes(unconsumed)
-	if err != nil {
-		return nil, 0, fmt.Errorf("error parsing indicator section: %w", err)
+	if sec1.gridDescriptionSectionIncluded() {
+		sec2 = &gridDescriptionSection{}
+		bytesRead, err = sec2.parseBytes(unconsumed)
+		if err != nil {
+			return nil, 0, fmt.Errorf("error parsing indicator section: %w", err)
+		}
+		unconsumed = unconsumed[bytesRead:]
+		offset += bytesRead
 	}
-	sec3.values = nil // DO NOT SUBMIT
-	unconsumed = unconsumed[bytesRead:]
+
+	if sec1.bitmapSectionIncluded() {
+		sec3 = &bitmapSection{}
+		bytesRead, err = sec3.parseBytes(unconsumed)
+		if err != nil {
+			return nil, 0, fmt.Errorf("error parsing indicator section: %w", err)
+		}
+		sec3.values = nil // DO NOT SUBMIT
+		unconsumed = unconsumed[bytesRead:]
+		offset += bytesRead
+	}
 
 	sec4 := &binaryDataSection{}
 	bytesRead, err = sec4.parseBytes(unconsumed)
@@ -98,6 +110,7 @@ func Read1(data []byte) (*Message, int, error) {
 		return nil, 0, fmt.Errorf("error parsing binary data section: %w", err)
 	}
 	unconsumed = unconsumed[bytesRead:]
+	offset += bytesRead
 
 	sec5 := &endSection{}
 	bytesRead, err = sec5.parseBytes(unconsumed)
@@ -105,6 +118,7 @@ func Read1(data []byte) (*Message, int, error) {
 		return nil, 0, fmt.Errorf("error parsing binary data section: %w", err)
 	}
 	unconsumed = unconsumed[bytesRead:]
+	offset += bytesRead
 
 	consumedCount := len(data) - len(unconsumed)
 	if consumedCount != int(sec0.messageLength) {
@@ -189,6 +203,29 @@ type productDefSection struct {
 	decimalScaleFactor                       int32  // parse2ByteUint(data[21], data[22])
 }
 
+/*
+	Code table 1 – Flag indication relative to Sections 2 and 3
+
+Bit No. Value Meaning
+1       0     Section 2 omitted
+1       1     Section 2 included
+2       0     Section 3 omitted
+2       1     Section 3 included
+Note: Bits enumerated from left to right.
+*/
+const (
+	section2Included = 1 << 7
+	section3Included = 1 << 6
+)
+
+func (s *productDefSection) gridDescriptionSectionIncluded() bool {
+	return (s.section1Flags & section2Included) != 0
+}
+
+func (s *productDefSection) bitmapSectionIncluded() bool {
+	return (s.section1Flags & section3Included) != 0
+}
+
 func (s *productDefSection) parseBytes(data []byte) (int, error) {
 	/* https://apps.ecmwf.int/codes/grib/format/grib1/sections/1/
 
@@ -250,8 +287,6 @@ func (s *productDefSection) parseBytes(data []byte) (int, error) {
 	if int(s.section1Length) > len(data) {
 		return 0, fmt.Errorf("section 1 claims its length %d is greater than data size %d", s.section1Length, len(data))
 	}
-
-	glog.Infof("read product def section %+v", s)
 
 	return int(s.section1Length), nil
 }
@@ -356,7 +391,7 @@ func (s *bitmapSection) parseBytes(data []byte) (int, error) {
 	}
 
 	if s.tableReference == 0 {
-		s.values = data[6:]
+		s.values = data[6:s.section3Length]
 	}
 
 	return int(s.section3Length), nil

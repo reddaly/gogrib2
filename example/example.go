@@ -5,7 +5,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"os"
 
 	"github.com/golang/glog"
 	"github.com/sdifrance/gogrib2/gribio"
@@ -19,7 +19,7 @@ func main() {
 }
 
 func run(_ context.Context) error {
-	gribBytes, err := ioutil.ReadFile("/usr/local/google/home/reddaly/tmp/ERA5_Land_Hourly_20221023_default_00.grib")
+	gribBytes, err := os.ReadFile("/usr/local/google/home/reddaly/tmp/ERA5_Land_Hourly_20221023_default_00.grib")
 	if err != nil {
 		return err
 	}
@@ -28,7 +28,7 @@ func run(_ context.Context) error {
 		return fmt.Errorf("error parsing grib file contents: %w", err)
 	}
 	for i, s := range file.GRIB1Messages() {
-		glog.Infof("struct %d: %s", i, s)
+		glog.Infof("struct %d: %+v", i, s)
 	}
 	return nil
 }
