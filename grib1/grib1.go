@@ -28,10 +28,22 @@ type Message struct {
 
 // String returns a summary description of the message.
 func (m *Message) String() string {
-	if m.product.indicatorOfParameter == 169 {
-		return "SOLAR DOWNWARD RADIATION"
+	suffix := ""
+
+	if m.grid != nil {
+		suffix += fmt.Sprintf(" datarep = %d", m.grid.dataRepresentationType)
 	}
-	return fmt.Sprintf("indicator of parameter = https://apps.ecmwf.int/codes/grib/param-db/?id=%d; table2Version = %d", m.product.indicatorOfParameter, m.product.table2Version)
+
+	switch m.product.indicatorOfParameter {
+	case 169:
+		suffix += " (SOLAR DOWNWARD RADIATION)"
+	case 165:
+		suffix += " (eastward component of the 10m wind)"
+	case 166:
+		suffix += " (northward component of the 10m wind)"
+	}
+
+	return fmt.Sprintf("indicator of parameter = https://apps.ecmwf.int/codes/grib/param-db/?id=%d; table2Version = %d%s", m.product.indicatorOfParameter, m.product.table2Version, suffix)
 }
 
 // Value is data item of GRIB2 file
@@ -319,7 +331,7 @@ type gridDescriptionSection struct {
 	pvlLocation uint8
 
 	// Data representation type (see Code table 6)
-	dataRepresentationType codetable
+	dataRepresentationType DataRepresentationType
 	/*Grid definition (according to data representation type octet 6 above)
 	33-42			Extensions of grid definition for rotation or stretching of the coordinate system or Lambert conformal projection or Mercator projection
 	33-44			Extensions of grid definition for space view perspective projection
@@ -356,7 +368,7 @@ func (s *gridDescriptionSection) parseBytes(data []byte) (int, error) {
 	// or 255 (all bits set to 1) if neither are present
 	s.pvlLocation = data[4]
 
-	s.dataRepresentationType = codetable(data[5])
+	s.dataRepresentationType = DataRepresentationType(data[5])
 
 	if int(s.section2Length) > len(data) {
 		return 0, fmt.Errorf("section 2 claims its length %d is greater than data size %d", s.section2Length, len(data))
@@ -547,4 +559,56 @@ const (
 	UnitOfTime15Minutes = 13
 	UnitOfTime30Minutes = 14
 	UnitOfTimeSecond    = 254
+)
+
+// DataRepresentationType indicates the data representation used.
+type DataRepresentationType uint8
+
+const (
+	// DataRepresentationTypeLL indicates Latitude/Longitude Grid.
+	DataRepresentationTypeLL = 0
+	// DataRepresentationTypeMM indicates Mercator Projection Grid.
+	DataRepresentationTypeMM = 1
+	// DataRepresentationTypeGP indicates Gnomonic Projection Grid.
+	DataRepresentationTypeGP = 2
+	// DataRepresentationTypeLC indicates Lambert Conformal.
+	DataRepresentationTypeLC = 3
+	// DataRepresentationTypeGG indicates Gaussian Latitude/Longitude Grid.
+	DataRepresentationTypeGG = 4
+	// DataRepresentationTypePS indicates Polar Stereographic Projection Grid.
+	DataRepresentationTypePS = 5
+	// DataRepresentationType6 indicates  Universal Transverse Mercator.
+	DataRepresentationType6 = 6
+	// DataRepresentationType7 indicates  Simple polyconic projection.
+	DataRepresentationType7 = 7
+	// DataRepresentationType8 indicates Albers equal-area, secant or tangent, conic or bi-polar.
+	DataRepresentationType8 = 8
+	// DataRepresentationType9 indicates Miller's cylingrical projection.
+	DataRepresentationType9 = 9
+	// DataRepresentationType10 indicates Rotated Latitude/Longitude grid.
+	DataRepresentationType10 = 10
+	// DataRepresentationTypeOL indicates Oblique Lambert conformal.
+	DataRepresentationTypeOL = 13
+	// DataRepresentationType14 indicates Rotated Gaussian latitude/longitude grid.
+	DataRepresentationType14 = 14
+	// DataRepresentationType20 indicates Stretched latitude/longitude grid.
+	DataRepresentationType20 = 20
+	// DataRepresentationType24 indicates Stretched Gaussian latitude/longitude.
+	DataRepresentationType24 = 24
+	// DataRepresentationType30 indicates Stretched and rotated latitude/longitude.
+	DataRepresentationType30 = 30
+	// DataRepresentationType34 indicates Stretched and rotated Gaussian latitude/longitude.
+	DataRepresentationType34 = 34
+	// DataRepresentationTypeSH indicates Spherical Harmonic Coefficients.
+	DataRepresentationTypeSH = 50
+	// DataRepresentationType60 indicates Rotated Spherical Harmonic coefficients.
+	DataRepresentationType60 = 60
+	// DataRepresentationType70 indicates Stretched Spherical Harmonic coefficients.
+	DataRepresentationType70 = 70
+	// DataRepresentationType80 indicates Stretched and rotated Spherical Harmonic.
+	DataRepresentationType80 = 80
+	// DataRepresentationTypeSV indicates Space view perspective or orthographic grid.
+	DataRepresentationTypeSV = 90
+	// DataRepresentationType193 indicates Quasi-regular latitude/longitude.
+	DataRepresentationType193 = 193
 )
