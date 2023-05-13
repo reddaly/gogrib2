@@ -20,10 +20,17 @@ import (
 // Message is a GRIB1 record.
 type Message struct {
 	ind     *indicatorSection
-	product *productDefSection
+	product *ProductDefinition
 	grid    *gridDescriptionSection
-	bitmap  *bitmapSection
+	bitmap  *Bitmap
 	binary  *binaryDataSection
+}
+
+// ProductDefinition returns an object that describes the data contained in the record.
+//
+// See https://apps.ecmwf.int/codes/grib/format/grib1/sections/1/.
+func (m *Message) ProductDefinition() *ProductDefinition {
+	return m.product
 }
 
 // String returns a summary description of the message.
@@ -102,7 +109,7 @@ func Read1(data []byte) (*Message, int, error) {
 	unconsumed := data[bytesRead:]
 	offset += bytesRead
 
-	sec1 := &productDefSection{}
+	sec1 := &ProductDefinition{}
 	bytesRead, err = sec1.parseBytes(unconsumed)
 	if err != nil {
 		return nil, 0, fmt.Errorf("error parsing indicator section: %w", err)
@@ -111,7 +118,7 @@ func Read1(data []byte) (*Message, int, error) {
 	offset += bytesRead
 
 	var sec2 *gridDescriptionSection
-	var sec3 *bitmapSection
+	var sec3 *Bitmap
 
 	if sec1.gridDescriptionSectionIncluded() {
 		sec2 = &gridDescriptionSection{}
@@ -123,8 +130,8 @@ func Read1(data []byte) (*Message, int, error) {
 		offset += bytesRead
 	}
 
-	if sec1.bitmapSectionIncluded() {
-		sec3 = &bitmapSection{}
+	if sec1.BitmapIncluded() {
+		sec3 = &Bitmap{}
 		bytesRead, err = sec3.parseBytes(unconsumed)
 		if err != nil {
 			return nil, 0, fmt.Errorf("error parsing indicator section: %w", err)
@@ -202,7 +209,8 @@ func (is *indicatorSection) parseBytes(data []byte) (int, error) {
 	return 8, nil
 }
 
-type productDefSection struct {
+// ProductDefinition has information about the contents of a Message.
+type ProductDefinition struct {
 	section1Length              uint32 // parse3ByteUint(data[0], data[1], data[2])
 	table2Version               uint8  // data[3]
 	center                      uint8  // data[4]
@@ -213,24 +221,39 @@ type productDefSection struct {
 	//
 	// This might indicate the type of data represented? e.g., 169 corresponds to
 	// downward solar radiation. https://apps.ecmwf.int/codes/grib/param-db/?id=169
-	indicatorOfParameter                     uint8      // data[8]
-	indicatorOfTypeOfLevel                   uint8      // data[9]
-	heightPressureEtcOfLevels                uint32     // parse2ByteUint(data[10], data[11])
-	yearOfCentury                            uint8      // data[12]
-	month                                    uint8      // data[13]
-	day                                      uint8      // data[14]
-	hour                                     uint8      // data[15]
-	minute                                   uint8      // data[16]
-	unitOfTimeRange                          UnitOfTime // data[17]
-	p1                                       uint8      // data[18]
-	p2                                       uint8      // data[19]
-	timeRangeIndicator                       uint8      // data[20]
-	numberIncludedInAverage                  uint32     // parse2ByteUint(data[21], data[22])
-	numberMissingFromAveragesOrAccumulations uint8      // data[23]
-	centuryOfReferenceTimeOfData             uint8      // data[24]
-	subCentre                                uint8      // data[25]
-	decimalScaleFactor                       int32      // parse2ByteUint(data[21], data[22])
+	indicatorOfParameter                     IndicatorOfParameter // data[8]
+	indicatorOfTypeOfLevel                   uint8                // data[9]
+	heightPressureEtcOfLevels                uint32               // parse2ByteUint(data[10], data[11])
+	yearOfCentury                            uint8                // data[12]
+	month                                    uint8                // data[13]
+	day                                      uint8                // data[14]
+	hour                                     uint8                // data[15]
+	minute                                   uint8                // data[16]
+	unitOfTimeRange                          UnitOfTime           // data[17]
+	p1                                       uint8                // data[18]
+	p2                                       uint8                // data[19]
+	timeRangeIndicator                       uint8                // data[20]
+	numberIncludedInAverage                  uint32               // parse2ByteUint(data[21], data[22])
+	numberMissingFromAveragesOrAccumulations uint8                // data[23]
+	centuryOfReferenceTimeOfData             uint8                // data[24]
+	subCentre                                uint8                // data[25]
+	decimalScaleFactor                       int32                // parse2ByteUint(data[21], data[22])
 }
+
+func (p *ProductDefinition) IndicatorOfParameter() IndicatorOfParameter {
+	return p.indicatorOfParameter
+}
+
+// IndicatorOfParameter is one of the values from the table defined here: https://codes.ecmwf.int/grib/format/grib1/parameter/2/.
+//
+// A machine readable list of parameters can be obtianed from https://codes.ecmwf.int/grib/json/.
+type IndicatorOfParameter uint8
+
+const (
+	ParameterID10MeterUWindComponent          = 165
+	ParameterID10MeterVWindComponent          = 166
+	ParameterIDSurfaceSolarRadiationDownwards = 169
+)
 
 /*
 	Code table 1 – Flag indication relative to Sections 2 and 3
@@ -247,15 +270,15 @@ const (
 	section3Included = 1 << 6
 )
 
-func (s *productDefSection) gridDescriptionSectionIncluded() bool {
+func (s *ProductDefinition) gridDescriptionSectionIncluded() bool {
 	return (s.section1Flags & section2Included) != 0
 }
 
-func (s *productDefSection) bitmapSectionIncluded() bool {
+func (s *ProductDefinition) BitmapIncluded() bool {
 	return (s.section1Flags & section3Included) != 0
 }
 
-func (s *productDefSection) parseBytes(data []byte) (int, error) {
+func (s *ProductDefinition) parseBytes(data []byte) (int, error) {
 	/* https://apps.ecmwf.int/codes/grib/format/grib1/sections/1/
 
 		Octets	Key	Type	Content
@@ -295,7 +318,7 @@ func (s *productDefSection) parseBytes(data []byte) (int, error) {
 	s.generatingProcessIdentifier = data[5]
 	s.gridDefinition = data[6]
 	s.section1Flags = data[7]
-	s.indicatorOfParameter = data[8]
+	s.indicatorOfParameter = IndicatorOfParameter(data[8])
 	s.indicatorOfTypeOfLevel = data[9]
 	s.heightPressureEtcOfLevels = parse2ByteUint(data[10], data[11])
 	s.yearOfCentury = data[12]
@@ -319,8 +342,6 @@ func (s *productDefSection) parseBytes(data []byte) (int, error) {
 
 	return int(s.section1Length), nil
 }
-
-type codetable uint8
 
 type gridDescriptionSection struct {
 	// 	Length of section (octets)
@@ -377,7 +398,7 @@ func (s *gridDescriptionSection) parseBytes(data []byte) (int, error) {
 	return int(s.section2Length), nil
 }
 
-type bitmapSection struct {
+type Bitmap struct {
 	// 	Length of section (octets)
 	section3Length uint32
 	// 	Number of unused bits at end of Section 3
@@ -392,7 +413,7 @@ type bitmapSection struct {
 	values []byte
 }
 
-func (s *bitmapSection) parseBytes(data []byte) (int, error) {
+func (s *Bitmap) parseBytes(data []byte) (int, error) {
 	/* https://apps.ecmwf.int/codes/grib/format/grib1/sections/1/
 
 			Octets	Key	Type	Content
@@ -524,7 +545,7 @@ func parse2ByteUint(byte0, byte1 byte) uint32 {
 func parse2ByteInt(byte0, byte1 byte) int32 {
 	// A negative value of D shall be indicated by setting the high-order bit (bit 1) in the left-hand octet to 1 (on).
 	unsigned := parse2ByteUint(byte0, byte1)
-	absValue := unsigned & 0b0111111111111111
+	absValue := (unsigned & 0b0111111111111111)
 	negative := unsigned&(1<<15) != 0
 	if negative {
 		return -1 * int32(absValue)
