@@ -14,7 +14,7 @@ import (
 )
 
 var (
-	input = flag.String("input", "era5-land/ERA5_Land_Monthly_201901_default_00.grib", "Path to the input grib file.")
+	input = flag.String("input", "/usr/local/google/home/reddaly/tapestry/era5-land/ERA5_Land_Monthly_201901_default_00.grib", "Path to the input grib file.")
 )
 
 func main() {

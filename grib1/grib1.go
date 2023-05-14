@@ -15,13 +15,14 @@ inspect the contents from the C library:
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 )
 
 // Message is a GRIB1 record.
 type Message struct {
 	ind     *indicatorSection
 	product *ProductDefinition
-	grid    *gridDescriptionSection
+	grid    *GridDescription
 	bitmap  *Bitmap
 	binary  *binaryDataSection
 }
@@ -31,6 +32,16 @@ type Message struct {
 // See https://apps.ecmwf.int/codes/grib/format/grib1/sections/1/.
 func (m *Message) ProductDefinition() *ProductDefinition {
 	return m.product
+}
+
+// Bitmap returns the bitmap infromation stored in the message.
+func (m *Message) Bitmap() *Bitmap {
+	return m.bitmap
+}
+
+// GridDescription returns the GridDescription stored in the message.
+func (m *Message) GridDescription() *GridDescription {
+	return m.grid
 }
 
 // String returns a summary description of the message.
@@ -117,11 +128,11 @@ func Read1(data []byte) (*Message, int, error) {
 	unconsumed = unconsumed[bytesRead:]
 	offset += bytesRead
 
-	var sec2 *gridDescriptionSection
+	var sec2 *GridDescription
 	var sec3 *Bitmap
 
 	if sec1.gridDescriptionSectionIncluded() {
-		sec2 = &gridDescriptionSection{}
+		sec2 = &GridDescription{}
 		bytesRead, err = sec2.parseBytes(unconsumed)
 		if err != nil {
 			return nil, 0, fmt.Errorf("error parsing indicator section: %w", err)
@@ -343,12 +354,18 @@ func (s *ProductDefinition) parseBytes(data []byte) (int, error) {
 	return int(s.section1Length), nil
 }
 
-type gridDescriptionSection struct {
+// GridDescription contains information about the coordinate system and bitmap entries.
+//
+// Based on
+type GridDescription struct {
 	// 	Length of section (octets)
 	section2Length uint32
 	// 	NV number of vertical coordinate parameters
 	numberOfVerticalCoordinateValues uint8
-	// PV location (octet number) of the list of vertical coordinate parameters, if present; or PL location (octet number) of the list of numbers of points in each row (if no vertical coordinate parameters are present), if present; or 255 (all bits set to 1) if neither are present
+	// PV location (octet number) of the list of vertical coordinate parameters,
+	// if present; or PL location (octet number) of the list of numbers of points
+	// in each row (if no vertical coordinate parameters are present), if present;
+	// or 255 (all bits set to 1) if neither are present
 	pvlLocation uint8
 
 	// Data representation type (see Code table 6)
@@ -360,9 +377,12 @@ type gridDescriptionSection struct {
 	PV			List of vertical coordinate parameters (length = NV × 4 octets); if present, then PL = 4NV + PV
 	PL			List of numbers of points in each row (length = NROWS x 2 octets, where NROWS is the total number of rows defined within the grid description)
 	*/
+
+	// parsedValue is the parsed value of the grid description based on dataRepresentationType.
+	parsedValue interface{} // *LatLongGrid, for example.
 }
 
-func (s *gridDescriptionSection) parseBytes(data []byte) (int, error) {
+func (s *GridDescription) parseBytes(data []byte) (int, error) {
 	/* https://apps.ecmwf.int/codes/grib/format/grib1/sections/1/
 
 			Octets	Key	Type	Content
@@ -395,7 +415,194 @@ func (s *gridDescriptionSection) parseBytes(data []byte) (int, error) {
 		return 0, fmt.Errorf("section 2 claims its length %d is greater than data size %d", s.section2Length, len(data))
 	}
 
+	representationBytes := data[6:s.section2Length]
+	switch s.dataRepresentationType {
+	case DataRepresentationTypeLL:
+		grid := &LatLongGrid{}
+		if err := grid.parseBytes(representationBytes); err != nil {
+			return 0, fmt.Errorf("section 2 failed to parse DataRepresentationTypeLL: %w", err)
+		}
+		s.parsedValue = grid
+	default:
+		s.parsedValue = unparsedGridDescription(representationBytes)
+		// Don't attempt to parse the remaining bytes.
+	}
+
 	return int(s.section2Length), nil
+}
+
+// LatLongGrid returns the LatLongGrid parsed from the GridDescription iff
+// the DataRepresentationType is DataRepresentationTypeLL. Otherwise, returns
+// nil.
+func (s *GridDescription) LatLongGrid() *LatLongGrid {
+	if x, ok := s.parsedValue.(*LatLongGrid); ok {
+		return x
+	}
+	return nil
+}
+
+// unparsedGridDescription stores the part of GridDescription that wasn't parsed.
+type unparsedGridDescription []byte
+
+// LatLongGrid specifies a latitude/longitude grid or equidistant cylindrical points.
+type LatLongGrid struct {
+	numPointsAlongParallel, numPointsAlongMeridian uint16
+	firstGridPoint, lastGridPoint                  LatLng
+	parallelIncrement, meridianIncrement           QuantizedAngle
+	resolutionAndComponentFlags                    resolutionAndComponentFlags
+	scanningMode                                   scanningMode
+}
+
+func (s *LatLongGrid) parseBytes(data []byte) error {
+	/* https://codes.ecmwf.int/grib/format/grib1/grids/0/
+
+
+	Octets	Key	Type	Content
+	7-8	Ni	unsigned	Ni number of points along a parallel
+	9-10	Nj	unsigned	Nj number of points along a meridian
+	11-13	latitudeOfFirstGridPoint	signed	La1 latitude of first grid point
+	14-16	longitudeOfFirstGridPoint	signed	Lo1 longitude of first grid point
+	17	resolutionAndComponentFlags	codeflag	Resolution and component flags (see Code table 7)
+	18-20	latitudeOfLastGridPoint	signed	La2 latitude of last grid point
+	21-23	longitudeOfLastGridPoint	signed	Lo2 longitude of last grid point
+	24-25	iDirectionIncrement	unsigned	Di i direction increment
+	26-27	jDirectionIncrement	unsigned	Dj j direction increment
+	28	scanningMode	codeflag	Scanning mode (flags see Flag/Code table 8)
+	29-32			Set to zero (reserved)
+	*/
+	s.numPointsAlongParallel = uint16(parse2ByteUint(data[0], data[1]))
+	s.numPointsAlongMeridian = uint16(parse2ByteUint(data[2], data[3]))
+
+	s.firstGridPoint.lat.milliDegrees = parse3ByteInt(data[4], data[5], data[6])
+	s.firstGridPoint.lng.milliDegrees = parse3ByteInt(data[7], data[8], data[9])
+	s.resolutionAndComponentFlags = resolutionAndComponentFlags(data[10])
+	s.lastGridPoint.lat.milliDegrees = parse3ByteInt(data[11], data[12], data[13])
+	s.lastGridPoint.lng.milliDegrees = parse3ByteInt(data[14], data[15], data[16])
+	s.parallelIncrement.milliDegrees = int32(parse2ByteUint(data[17], data[18]))
+	s.meridianIncrement.milliDegrees = int32(parse2ByteUint(data[19], data[20]))
+	s.scanningMode = scanningMode(data[21])
+
+	if !s.scanningMode.pointsScanInPlusIDirection() {
+		s.parallelIncrement.milliDegrees *= -1
+	}
+	if !s.scanningMode.pointsScanInPlusJDirection() {
+		s.meridianIncrement.milliDegrees *= -1
+	}
+
+	return nil
+}
+
+func (s *LatLongGrid) Points() []LatLng {
+	var out []LatLng
+
+	if s.scanningMode.adjacentPointsInIDirectionAreConsecutive() {
+		for j := 0; j < int(s.numPointsAlongMeridian); j++ {
+			lat := s.firstGridPoint.lat
+			lat.milliDegrees += int32(j) * s.meridianIncrement.milliDegrees
+			for i := 0; i < int(s.numPointsAlongParallel); i++ {
+				lng := s.firstGridPoint.lng
+				lng.milliDegrees += int32(i) * s.parallelIncrement.milliDegrees
+				out = append(out, LatLng{lat, lng})
+			}
+		}
+	} else {
+		for i := 0; i < int(s.numPointsAlongParallel); i++ {
+			lng := s.firstGridPoint.lng
+			lng.milliDegrees += int32(i) * s.parallelIncrement.milliDegrees
+			for j := 0; j < int(s.numPointsAlongMeridian); j++ {
+				lat := s.firstGridPoint.lat
+				lat.milliDegrees += int32(j) * s.meridianIncrement.milliDegrees
+				out = append(out, LatLng{lat, lng})
+			}
+		}
+	}
+
+	return out
+}
+
+// QuantizedAngle is used for a lat/lng point.
+type QuantizedAngle struct {
+	milliDegrees int32
+}
+
+// Degrees returns the angle in degrees.
+func (a QuantizedAngle) Degrees() float32 {
+	return float32(a.milliDegrees) / 1000
+}
+
+// LatLng represents a latitude/longitude point.
+type LatLng struct {
+	lat, lng QuantizedAngle
+}
+
+// String returns a human-readable representation of the lat/lng.
+func (ll LatLng) String() string {
+	return fmt.Sprintf("%f, %f", ll.lat.Degrees(), ll.lng.Degrees())
+}
+
+// Plus adds one Lat/Lng to another.
+func (ll LatLng) Plus(other LatLng) LatLng {
+	ll.lat.milliDegrees += other.lat.milliDegrees
+	ll.lng.milliDegrees += other.lng.milliDegrees
+	return ll
+}
+
+// Lat returns the latitude.
+func (ll LatLng) Lat() QuantizedAngle { return ll.lat }
+
+// Lng returns the longitue.
+func (ll LatLng) Lng() QuantizedAngle { return ll.lng }
+
+// resolutionAndComponentFlags describes a value from table 7 https://codes.ecmwf.int/grib/format/grib1/flag/7/.
+type resolutionAndComponentFlags uint8
+
+const (
+	directionIncrementsGiven     = 1 << 7
+	earthAssumedOblateSpheroidal = 1 << 6
+)
+
+func (f resolutionAndComponentFlags) DirectionIncrementsGiven() bool {
+	return (f & directionIncrementsGiven) != 0
+}
+
+// scanningMode is a value for the codepoint flag described here:
+// https://codes.ecmwf.int/grib/format/grib1/flag/8/. It affects
+// how grid representation incrementing works.
+type scanningMode uint8
+
+func (m scanningMode) String() string {
+	iDir := "-i"
+	if m.pointsScanInPlusIDirection() {
+		iDir = "+i"
+	}
+	jDir := "-j"
+	if m.pointsScanInPlusJDirection() {
+		jDir = "+j"
+	}
+	adj := "jDirAdj"
+	if m.adjacentPointsInIDirectionAreConsecutive() {
+		adj = "iDirAdj"
+	}
+
+	return fmt.Sprintf("(%s, %s, %s)", iDir, jDir, adj)
+}
+
+const (
+	pointsScanInMinusIDirection    = 1 << 7
+	pointsScanInPlusJDirection     = 1 << 6
+	adjPointsJDirectionConsecutive = 1 << 5
+)
+
+func (m scanningMode) pointsScanInPlusIDirection() bool {
+	return (m & pointsScanInMinusIDirection) == 0
+}
+
+func (m scanningMode) pointsScanInPlusJDirection() bool {
+	return (m & pointsScanInPlusJDirection) != 0
+}
+
+func (m scanningMode) adjacentPointsInIDirectionAreConsecutive() bool {
+	return (m & adjPointsJDirectionConsecutive) == 0
 }
 
 type Bitmap struct {
@@ -453,7 +660,7 @@ type binaryDataSection struct {
 	// 	Length of section (octets)
 	section4Length uint32
 	// 	Flag (see Code table 11) (first 4 bits). Number of unused bits at end of Section 4 (last 4 bits)
-	dataFlag uint8
+	dataFlag binaryDataFlag
 	// Table reference: If the octets contain zero, a bit-map follows If the
 	// octets contain a number, it refers to a predetermined bit-map provided by
 	// the centre.
@@ -465,32 +672,29 @@ type binaryDataSection struct {
 	bitsPerValue uint8
 
 	// Variable, depending on the flag value in octet 4.
-	variables []float64
+	variables         []float32
+	unparsedVariables []byte
 }
 
 func (s *binaryDataSection) parseBytes(data []byte) (int, error) {
-	/* https://apps.ecmwf.int/codes/grib/format/grib1/sections/1/
+	/* https://codes.ecmwf.int/grib/format/grib1/sections/4/
 
-			Octets	Key	Type	Content
-		1-3	section4Length	unsigned	Length of section (octets)
-	4	numberOfVerticalCoordinateValues	unsigned	NV number of vertical coordinate parameters
-	5	pvlLocation	unsigned	PV location (octet number) of the list of vertical coordinate parameters, if present; or PL location (octet number) of the list of numbers of points in each row (if no vertical coordinate parameters are present), if present; or 255 (all bits set to 1) if neither are present
-	6	dataRepresentationType	codetable	Data representation type (see Code table 6)
-	7-32			Grid definition (according to data representation type octet 6 above)
-	33-42			Extensions of grid definition for rotation or stretching of the coordinate system or Lambert conformal projection or Mercator projection
-	33-44			Extensions of grid definition for space view perspective projection
-	33-52			Extensions of grid definition for stretched and rotated coordinate system
-	PV			List of vertical coordinate parameters (length = NV × 4 octets); if present, then PL = 4NV + PV
-	PL			List of numbers of points in each row (length = NROWS x 2 octets, where NROWS is the total number of rows defined within the grid description)
+	1-3	section4Length	unsigned	Length of section
+	4	dataFlag	codeflag	Flag (see Code table 11) (first 4 bits). Number of unused bits at end of Section 4 (last 4 bits)
+	5-6	binaryScaleFactor	signed	Scale factor (E)
+	7-10	referenceValue	real	Reference value (minimum of packed values)
+	11	bitsPerValue	unsigned	Number of bits containing each packed value
+	12-nn			Variable, depending on the flag value in octet 4
 	*/
 
 	if len(data) < 11 { // data[10] should be valid
 		return 0, fmt.Errorf("GRIB file section must be at least 11 bytes long, got %d", len(data))
 	}
 	s.section4Length = parse3ByteUint(data[0], data[1], data[2])
-	s.dataFlag = data[3]
+	s.dataFlag = binaryDataFlag(data[3])
 	s.binaryScaleFactor = parse2ByteInt(data[4], data[5])
 	s.referenceValue = parse4ByteReal(data[6], data[7], data[8], data[9])
+	s.bitsPerValue = data[10]
 
 	if int(s.section4Length) > len(data) {
 		return 0, fmt.Errorf("section 3 claims its length %d is greater than data size %d", s.section4Length, len(data))
@@ -502,9 +706,37 @@ func (s *binaryDataSection) parseBytes(data []byte) (int, error) {
 	// (2) The actual value Y (in the units of Code table 2) is linked to the coded value X, the reference
 	// value R, the binary scale factor E and the decimal scale factor D by means of the following
 	// formula:
-	// Y × 10D = R + X × 2E
+	// Y × 10^D = R + (X1 + X2) × 2^E
+	if s.dataFlag.floatingPointValuesRepresented() {
+		if s.bitsPerValue != 32 {
+			return 0, fmt.Errorf("bitsPerValue = %d, wanted 32 for floating point values", s.bitsPerValue)
+		}
+		unparsedVariables := data[11:]
+		if len(unparsedVariables)%4 != 0 {
+			return 0, fmt.Errorf("len(data) = %d isn't divisible by 4", len(unparsedVariables))
+		}
+		for i := 0; i < len(unparsedVariables); i += 4 {
+			s.variables = append(s.variables, math.Float32frombits(binary.LittleEndian.Uint32(unparsedVariables[0:4])))
+		}
+	} else {
+		s.unparsedVariables = data[11:]
+	}
 
 	return int(s.section4Length), nil
+}
+
+// https://codes.ecmwf.int/grib/format/grib1/flag/11/
+type binaryDataFlag uint8
+
+const (
+	binaryDataFlagSphericalHarmonicCoefficients = 1 << (8 - 1)
+	binaryDataFlagComplexOrSecondOrderPacking   = 1 << (8 - 2)
+	binaryDataFlagIntegerValues                 = 1 << (8 - 3)
+	binaryDataFlagOctet14ContainsMoreFlagValues = 1 << (8 - 4)
+)
+
+func (f binaryDataFlag) floatingPointValuesRepresented() bool {
+	return f&binaryDataFlagIntegerValues == 0
 }
 
 type endSection struct{}
@@ -547,6 +779,16 @@ func parse2ByteInt(byte0, byte1 byte) int32 {
 	unsigned := parse2ByteUint(byte0, byte1)
 	absValue := (unsigned & 0b0111111111111111)
 	negative := unsigned&(1<<15) != 0
+	if negative {
+		return -1 * int32(absValue)
+	}
+	return int32(absValue)
+}
+
+func parse3ByteInt(byte0, byte1, byte2 byte) int32 {
+	unsigned := parse3ByteUint(byte0, byte1, byte2)
+	absValue := (unsigned & 0b011111111111111111111111)
+	negative := unsigned&(1<<23) != 0
 	if negative {
 		return -1 * int32(absValue)
 	}
