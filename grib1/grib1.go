@@ -16,6 +16,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+
+	"github.com/sdifrance/gogrib2/hexademicalfloatingpoint"
 )
 
 // Message is a GRIB1 record.
@@ -667,7 +669,7 @@ type binaryDataSection struct {
 	binaryScaleFactor int32
 
 	// Reference value (minimum of packed values)
-	referenceValue real
+	referenceValue float32
 	// Number of bits containing each packed value
 	bitsPerValue uint8
 
@@ -693,7 +695,7 @@ func (s *binaryDataSection) parseBytes(data []byte) (int, error) {
 	s.section4Length = parse3ByteUint(data[0], data[1], data[2])
 	s.dataFlag = binaryDataFlag(data[3])
 	s.binaryScaleFactor = parse2ByteInt(data[4], data[5])
-	s.referenceValue = parse4ByteReal(data[6], data[7], data[8], data[9])
+	s.referenceValue = float32(hexademicalfloatingpoint.Parse32(data[6:10]))
 	s.bitsPerValue = data[10]
 
 	if int(s.section4Length) > len(data) {
@@ -795,8 +797,9 @@ func parse3ByteInt(byte0, byte1, byte2 byte) int32 {
 	return int32(absValue)
 }
 
-func parse4ByteReal(byte0, byte1, byte2, byte3 byte) real {
+func parse4ByteReal(byte0, byte1, byte2, byte3 byte) float32 {
 	// A negative value of D shall be indicated by setting the high-order bit (bit 1) in the left-hand octet to 1 (on).
+
 	return real(parse4ByteUint(byte0, byte1, byte2, byte3))
 }
 
