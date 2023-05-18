@@ -65,6 +65,13 @@ func extractWeatherMessages(file *gribio.File) (*weatherMessages, error) {
 	if out.windV == nil {
 		return nil, fmt.Errorf("missing wind V record (ParameterID10MeterVWindComponent)")
 	}
+
+	dps, err := out.solar.SimpleDataPoints()
+	if err != nil {
+		return nil, fmt.Errorf("solar data extraction problem: %w", err)
+	}
+	glog.Infof("got %d solar data points", len(dps))
+
 	return out, nil
 }
 

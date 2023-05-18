@@ -16,6 +16,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"math/bits"
 
 	"github.com/sdifrance/gogrib2/hexademicalfloatingpoint"
 )
@@ -65,6 +66,36 @@ func (m *Message) String() string {
 
 	return fmt.Sprintf("indicator of parameter = https://apps.ecmwf.int/codes/grib/param-db/?id=%d; table2Version = %d%s", m.product.indicatorOfParameter, m.product.table2Version, suffix)
 }
+
+func (m *Message) SimpleDataPoints() ([]DataPoint, error) {
+	if m.binary.variableDecoder == nil {
+		return nil, fmt.Errorf("variable decoder is nil, which means the data might be valid, but we cannot extract DataPoint values because this library doesn't support the encoding")
+	}
+	points := m.grid.LatLongGrid().Points()
+	values := m.binary.variableDecoder()
+
+	if len(values) != m.bitmap.presentSize() {
+		return nil, fmt.Errorf("given a grid of %d lat/lng points, bitmap size %d should equal data size %d", len(points), m.bitmap.presentSize(), len(values))
+	}
+	var out []DataPoint
+	dataIndex := 0
+	for i := 0; i < len(points); i++ {
+		if !m.bitmap.isDataPresent(i) {
+			continue
+		}
+		out = append(out, DataPoint{points[i], values[dataIndex]})
+		dataIndex++
+	}
+	return out, nil
+}
+
+type DataPoint struct {
+	latLng LatLng
+	value  float64
+}
+
+func (dp *DataPoint) LatLng() LatLng { return dp.latLng }
+func (dp *DataPoint) Value() float64 { return dp.value }
 
 // Value is data item of GRIB2 file
 type Value struct {
@@ -154,7 +185,7 @@ func Read1(data []byte) (*Message, int, error) {
 	}
 
 	sec4 := &binaryDataSection{}
-	bytesRead, err = sec4.parseBytes(unconsumed)
+	bytesRead, err = sec4.parseBytes(sec1, unconsumed)
 	if err != nil {
 		return nil, 0, fmt.Errorf("error parsing binary data section: %w", err)
 	}
@@ -656,7 +687,43 @@ func (s *Bitmap) parseBytes(data []byte) (int, error) {
 	return int(s.section3Length), nil
 }
 
-type real int64
+func (s *Bitmap) size() int {
+	return len(s.values)*8 - int(s.numberOfUnusedBitsAtEndOfSection3)
+}
+
+// presentSize returns the number of 1 values in the bitmap data, which is the
+// number of data points present.
+func (s *Bitmap) presentSize() int {
+	method1 := func() int {
+		count := 0
+		for _, value := range s.values {
+			count += bits.OnesCount8(value)
+		}
+		return count
+	}()
+	method2 := func() int {
+		count := 0
+		for i := 0; i < s.size(); i++ {
+			if s.isDataPresent(i) {
+				count++
+			}
+		}
+		return count
+	}()
+	if method1 != method2 {
+		panic(fmt.Errorf("method1 doesn't match method2: %d vs %d", method1, method2))
+	}
+	return method1
+}
+
+func (s *Bitmap) isDataPresent(gridIndex int) bool {
+	if gridIndex >= s.size() {
+		panic(fmt.Errorf("invalid grid index %d exceeds bitmap size %d", gridIndex, s.size()))
+	}
+	byteIndex := gridIndex / 8
+	bitMask := uint8(1 << (7 - (gridIndex % 8)))
+	return (s.values[byteIndex] & bitMask) != 0
+}
 
 type binaryDataSection struct {
 	// 	Length of section (octets)
@@ -669,16 +736,17 @@ type binaryDataSection struct {
 	binaryScaleFactor int32
 
 	// Reference value (minimum of packed values)
-	referenceValue float32
+	referenceValue float64
 	// Number of bits containing each packed value
 	bitsPerValue uint8
 
 	// Variable, depending on the flag value in octet 4.
-	variables         []float32
+	variables         []float64
+	variableDecoder   func() []float64
 	unparsedVariables []byte
 }
 
-func (s *binaryDataSection) parseBytes(data []byte) (int, error) {
+func (s *binaryDataSection) parseBytes(product *ProductDefinition, data []byte) (int, error) {
 	/* https://codes.ecmwf.int/grib/format/grib1/sections/4/
 
 	1-3	section4Length	unsigned	Length of section
@@ -693,14 +761,19 @@ func (s *binaryDataSection) parseBytes(data []byte) (int, error) {
 		return 0, fmt.Errorf("GRIB file section must be at least 11 bytes long, got %d", len(data))
 	}
 	s.section4Length = parse3ByteUint(data[0], data[1], data[2])
+	if int(s.section4Length) > len(data) {
+		return 0, fmt.Errorf("invalid section 4 length value %d > size of data %d", s.section4Length, len(data))
+	}
 	s.dataFlag = binaryDataFlag(data[3])
 	s.binaryScaleFactor = parse2ByteInt(data[4], data[5])
-	s.referenceValue = float32(hexademicalfloatingpoint.Parse32(data[6:10]))
+	s.referenceValue = hexademicalfloatingpoint.Parse32(data[6:10])
 	s.bitsPerValue = data[10]
 
 	if int(s.section4Length) > len(data) {
 		return 0, fmt.Errorf("section 3 claims its length %d is greater than data size %d", s.section4Length, len(data))
 	}
+
+	inverseDecimalScaleFactor := math.Pow10(-int(product.decimalScaleFactor))
 
 	// 	Data shall be coded in the form of non-negative scaled differences from a reference value.
 	// Notes:
@@ -710,15 +783,33 @@ func (s *binaryDataSection) parseBytes(data []byte) (int, error) {
 	// formula:
 	// Y × 10^D = R + (X1 + X2) × 2^E
 	if s.dataFlag.floatingPointValuesRepresented() {
-		if s.bitsPerValue != 32 {
-			return 0, fmt.Errorf("bitsPerValue = %d, wanted 32 for floating point values", s.bitsPerValue)
+		bytesPerValue := s.bitsPerValue / 8
+		if s.bitsPerValue%8 != 0 {
+			return 0, fmt.Errorf("bits per value must be divisible by 8")
 		}
-		unparsedVariables := data[11:]
-		if len(unparsedVariables)%4 != 0 {
-			return 0, fmt.Errorf("len(data) = %d isn't divisible by 4", len(unparsedVariables))
+		if unusedBits := s.dataFlag.unusedBitsAtEndOfSection4(); unusedBits%8 != 0 {
+			return 0, fmt.Errorf("unsupported unused number of bits %d is not divisible by 8", unusedBits)
 		}
-		for i := 0; i < len(unparsedVariables); i += 4 {
-			s.variables = append(s.variables, math.Float32frombits(binary.LittleEndian.Uint32(unparsedVariables[0:4])))
+		unusedBytes := s.dataFlag.unusedBitsAtEndOfSection4() / 8
+
+		extractX, err := uintParser(int(s.bitsPerValue))
+		if err != nil {
+			return 0, err
+		}
+		unparsedVariables := data[11 : int(s.section4Length)-int(unusedBytes)]
+		if len(unparsedVariables)%int(bytesPerValue) != 0 {
+			return 0, fmt.Errorf("len(data) = %d isn't divisible by 2", len(unparsedVariables))
+		}
+		s.variableDecoder = func() []float64 {
+			var variables []float64
+			for i := 0; i < len(unparsedVariables); i += int(bytesPerValue) {
+				x := extractX(data[i : i+int(bytesPerValue)])
+				xPlusR := math.Ldexp(float64(x), int(s.binaryScaleFactor)) + s.referenceValue
+				// TODO(reddaly): divide by D
+				y := xPlusR * inverseDecimalScaleFactor
+				variables = append(variables, y)
+			}
+			return variables
 		}
 	} else {
 		s.unparsedVariables = data[11:]
@@ -739,6 +830,10 @@ const (
 
 func (f binaryDataFlag) floatingPointValuesRepresented() bool {
 	return f&binaryDataFlagIntegerValues == 0
+}
+
+func (f binaryDataFlag) unusedBitsAtEndOfSection4() uint8 {
+	return uint8(f & 0b0000_1111)
 }
 
 type endSection struct{}
@@ -764,6 +859,21 @@ Notes:
 
 */
 
+func uintParser(numBits int) (func(data []byte) uint32, error) {
+	switch numBits {
+	case 8:
+		return func(data []byte) uint32 { return parse1ByteUint(data[0]) }, nil
+	case 16:
+		return func(data []byte) uint32 { return parse2ByteUint(data[0], data[1]) }, nil
+	case 24:
+		return func(data []byte) uint32 { return parse3ByteUint(data[0], data[1], data[2]) }, nil
+	case 32:
+		return func(data []byte) uint32 { return parse4ByteUint(data[0], data[1], data[2], data[3]) }, nil
+	default:
+		return nil, fmt.Errorf("unsupported number of bits: %d must be 8, 16, 24, or 32", numBits)
+	}
+}
+
 func parse4ByteUint(byte0, byte1, byte2, byte3 byte) uint32 {
 	return binary.BigEndian.Uint32([]byte{byte0, byte1, byte2, byte3})
 }
@@ -774,6 +884,10 @@ func parse3ByteUint(byte0, byte1, byte2 byte) uint32 {
 
 func parse2ByteUint(byte0, byte1 byte) uint32 {
 	return parse3ByteUint(0, byte0, byte1)
+}
+
+func parse1ByteUint(byte0 byte) uint32 {
+	return parse3ByteUint(0, 0, byte0)
 }
 
 func parse2ByteInt(byte0, byte1 byte) int32 {
@@ -795,12 +909,6 @@ func parse3ByteInt(byte0, byte1, byte2 byte) int32 {
 		return -1 * int32(absValue)
 	}
 	return int32(absValue)
-}
-
-func parse4ByteReal(byte0, byte1, byte2, byte3 byte) float32 {
-	// A negative value of D shall be indicated by setting the high-order bit (bit 1) in the left-hand octet to 1 (on).
-
-	return real(parse4ByteUint(byte0, byte1, byte2, byte3))
 }
 
 // UnitOfTime is based on table 4 from the spec. See
